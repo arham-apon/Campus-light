@@ -17,6 +17,12 @@ log = get_logger(__name__)
 NO_OP_EXPLANATION = "This note does not affect today's 24-hour energy schedule."
 MAX_EXPLANATION_CHARS = 300
 
+# A model-supplied share is a fraction in [0, 1]. Values from 2 to 100 are read as percentages
+# (25 -> 0.25). A value in (1, 2) is neither a sane fraction nor a sane percentage (it would mean
+# 1-2 %), so it is treated as an out-of-range fraction and clamped to 1.0 (1.4 -> 1.0).
+PERCENT_RESCUE_MIN = 2.0
+PERCENT_RESCUE_MAX = 100.0
+
 
 def _clean_explanation(text: str | None, fallback: str) -> str:
     if not text or not str(text).strip():
@@ -54,6 +60,13 @@ def _finite(value) -> float | None:
     if math.isnan(number) or math.isinf(number):
         return None
     return number
+
+
+def _to_fraction(value: float) -> float:
+    """Coerce a model-supplied share into [0, 1]: percentages are rescaled, anything else clamped."""
+    if PERCENT_RESCUE_MIN <= value <= PERCENT_RESCUE_MAX:
+        value = value / 100.0
+    return min(1.0, max(0.0, value))
 
 
 def _no_op(note_index: int, explanation: str = NO_OP_EXPLANATION) -> DirectiveInterpretationEntry:
@@ -134,9 +147,7 @@ def apply_deterministic_guardrails(
             if factor is None:
                 validated.append(_no_op(index, "Solar reduction was stated without a usable fraction; treated as non-applicable."))
                 continue
-            if 1.0 < factor <= 100.0:      # model returned a percentage
-                factor = factor / 100.0
-            factor = min(1.0, max(0.0, factor))
+            factor = _to_fraction(factor)  # percentage rescue + clamp to [0, 1]
             adjustment = StructuredAdjustment(hours=hours, factor=round(factor, 6))
 
         elif directive is DirectiveType.MINIMUM_BATTERY_RESERVE:
@@ -144,10 +155,10 @@ def apply_deterministic_guardrails(
             if reserve is None:
                 validated.append(_no_op(index, "Reserve level could not be resolved; treated as non-applicable."))
                 continue
-            if entry.reserve_is_fraction_of_capacity and 1.0 < reserve <= 100.0:
-                reserve = reserve / 100.0  # flagged as a share of capacity but given as a percentage
-            if entry.reserve_is_fraction_of_capacity or (0.0 < reserve <= 1.0 and capacity > 1.0):
-                reserve = reserve * capacity
+            if entry.reserve_is_fraction_of_capacity:
+                reserve = _to_fraction(reserve) * capacity  # also rescues a flagged percentage (50 -> 0.5)
+            elif 0.0 < reserve <= 1.0 and capacity > 1.0:
+                reserve = reserve * capacity  # unflagged but clearly a share
             reserve = min(capacity, max(0.0, reserve))
             adjustment = StructuredAdjustment(hours=hours, minimum_energy_kwh=round(reserve, 6))
 

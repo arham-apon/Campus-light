@@ -24,6 +24,32 @@ def test_percentage_factor_is_rescaled_and_clamped():
     assert out[0].structured_adjustment.model_dump()["factor"] == 0.0
 
 
+def _factor(value):
+    out = guard([E(note_index=0, directive_type="solar_reduction", hours=[12], factor=value)], 1, 200.0, 40.0)
+    return out[0].structured_adjustment.model_dump()["factor"]
+
+
+def test_factor_boundaries_match_the_failure_matrix():
+    # Appendix C of the spec: 80 -> 0.8 (percentage rescue), 1.4 -> 1.0 (clamp)
+    assert _factor(80) == 0.8
+    assert _factor(1.4) == 1.0 and _factor(1.99) == 1.0
+    assert _factor(2) == 0.02 and _factor(100) == 1.0 and _factor(100.5) == 1.0
+    assert _factor(1.0) == 1.0 and _factor(0.5) == 0.5 and _factor(0.0) == 0.0
+    assert _factor(-0.0) == 0.0 and _factor(-4) == 0.0
+
+
+def test_flagged_reserve_boundaries():
+    def reserve(value):
+        out = guard([E(note_index=0, directive_type="minimum_battery_reserve", hours=[18], minimum_energy_kwh=value,
+                       reserve_is_fraction_of_capacity=True)], 1, 200.0, 40.0)
+        return out[0].structured_adjustment.model_dump()["minimum_energy_kwh"]
+
+    assert reserve(0.75) == 150.0 and reserve(1.0) == 200.0
+    assert reserve(1.5) == 200.0            # out-of-range fraction -> clamped to full capacity
+    assert reserve(50) == 100.0 and reserve(100) == 200.0
+    assert reserve(9999) == 200.0 and reserve(-3) == 0.0
+
+
 def test_fractional_reserve_is_expanded_against_capacity():
     out = guard([E(note_index=0, directive_type="minimum_battery_reserve", hours=[18], minimum_energy_kwh=0.5,
                    reserve_is_fraction_of_capacity=True)], 1, 200.0, 40.0)
