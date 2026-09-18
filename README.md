@@ -317,19 +317,26 @@ docker run --rm -d -p 8000:8000 -e GEMINI_API_KEY="$GEMINI_API_KEY" ghcr.io/arha
 sleep 5 && curl -s localhost:8000/health
 ```
 
+Pinned by immutable digest (identical image, tag-proof):
+
+```bash
+docker pull ghcr.io/arham-apon/gridwise@sha256:3bb1ba246734d0b93ba751493dc679b9424be996342293c9cd2535734d756303
+docker run --rm -d -p 8000:8000 -e GEMINI_API_KEY="$GEMINI_API_KEY" \
+  ghcr.io/arham-apon/gridwise@sha256:3bb1ba246734d0b93ba751493dc679b9424be996342293c9cd2535734d756303
+```
+
+The package is public, so both commands work without `docker login`. Verified on the published
+image: platform `linux/amd64`, runs as the non-root user `appuser`, exposes port 8000, carries a
+`/health` HEALTHCHECK, and has **no Gemini variable of any kind in its environment**.
+
 The image is built, smoke-tested and published by
 [`.github/workflows/docker-image.yml`](.github/workflows/docker-image.yml) on every push to `main`.
 That workflow starts the published image, asserts `/health` returns `{"status":"ok"}`, asserts it runs
 as the non-root user `appuser`, posts a real scenario and checks a 24-hour plan comes back, and
 confirms no Gemini secret is baked into the image.
 
-> **Submitter to fill in:** the immutable digest, printed in the workflow run summary as
-> `ghcr.io/arham-apon/gridwise@sha256:...`. The GHCR package must also be switched to public
-> (repository → Packages → `gridwise` → Package settings → Change visibility → Public), otherwise
-> judges cannot pull it.
-
-The only required environment variable is `GEMINI_API_KEY`. The service is single-process by design
-(`--workers 1`) because the cache and model cooldowns live in process memory.
+The only required environment variable is `GEMINI_API_KEY`, supplied at run time. The service is
+single-process by design (`--workers 1`) because the cache and model cooldowns live in process memory.
 
 ---
 
