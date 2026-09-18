@@ -1,0 +1,22 @@
+# Render deployment for the GridWise service.
+#
+# Runs the image already published to GHCR, so Render never has to build anything.
+# GEMINI_API_KEY is deliberately NOT in this file (sync: false) — it is typed into the Render
+# dashboard once and stored as a secret. Nothing secret is ever committed.
+#
+# Free-tier note: a free web service sleeps after 15 minutes without traffic and takes about a
+# minute to wake, which would exceed the challenge's 30 s request limit. Keep an external monitor
+# pinging /health every 10 minutes so it never sleeps.
+
+services:
+  - type: web
+    name: gridwise
+    runtime: image
+    plan: free
+    region: singapore          # closest Render region to Bangladesh
+    image:
+      url: ghcr.io/arham-apon/gridwise:preli-1.0.0
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false            # set this in the Render dashboard, never in git

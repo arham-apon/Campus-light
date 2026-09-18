@@ -342,23 +342,35 @@ single-process by design (`--workers 1`) because the cache and model cooldowns l
 
 ## 10. Public endpoint
 
-Base URL: **`https://adjustment-flexible-prefers-mat.trycloudflare.com`**
+Base URL: **`https://campus-light.onrender.com`**
 
 ```bash
-curl -s https://adjustment-flexible-prefers-mat.trycloudflare.com/health
+curl -s https://campus-light.onrender.com/health
 ```
 
 ```bash
-curl -s -X POST https://adjustment-flexible-prefers-mat.trycloudflare.com/optimize-energy \
+curl -s -X POST https://campus-light.onrender.com/optimize-energy \
      -H 'Content-Type: application/json' -d @data/sample_request.json
 ```
 
-Verified from outside the development machine: `/health` returns `{"status":"ok"}`, SAMPLE-01 returns
-HTTP 200 in about 2.0 s with the reference-optimal totals (2692.5 kWh / 38365 BDT / 175 kWh peak),
-and a malformed body returns 400.
+The service runs on Render from the published GHCR image — it does not depend on any development
+machine being switched on. Verified against this URL with
+[`scripts/verify_endpoint.py`](scripts/verify_endpoint.py), which replays every returned plan
+hour by hour through the independent validator in `tests/replay.py`:
 
-> The URL comes from a Cloudflare quick tunnel and lives only as long as the `cloudflared` process
-> that created it. If that process is restarted the URL changes and this section must be updated.
+| Check | Result |
+|---|---|
+| Public sample cases passed | **10 / 10** |
+| Operator notes interpreted correctly | **18 / 18** |
+| Latency | p50 1.69 s, **p95 2.97 s**, max 2.97 s (limit 30 s, target p95 ≤ 5 s) |
+| `GET /health` | 200 `{"status":"ok"}` in 0.46 s |
+| Malformed body | 400 |
+
+Reproduce it yourself against the live service:
+
+```bash
+python scripts/verify_endpoint.py https://campus-light.onrender.com
+```
 
 ---
 
