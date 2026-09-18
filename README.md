@@ -160,12 +160,12 @@ Request (abridged; `data/sample_request.json` has the full 24 hours):
     "The sports office moved next month's registration deadline."
   ],
   "hours": [
-    { "hour": 0, "demand_kwh": 90, "solar_kwh": 0, "tariff_bdt_per_kwh": 10 }
+    { "hour": 0, "demand_kwh": 90, "solar_kwh": 0, "tariff_bdt_per_kwh": 6 }
     // ... exactly 24 entries, hour 0..23 once each
   ],
   "battery": {
-    "capacity_kwh": 200, "initial_energy_kwh": 110, "minimum_energy_kwh": 40,
-    "max_charge_kwh_per_hour": 50, "max_discharge_kwh_per_hour": 40
+    "capacity_kwh": 220, "initial_energy_kwh": 110, "minimum_energy_kwh": 40,
+    "max_charge_kwh_per_hour": 50, "max_discharge_kwh_per_hour": 50
   }
 }
 ```
@@ -381,7 +381,7 @@ curl -s -X POST https://<your-tunnel>.trycloudflare.com/optimize-energy \
   `.env.example`, which has a placeholder, is committed.
 - No secret is in the image, its environment, or the repository. The key is read from the
   environment at run time.
-- Logs are redacted: the configured key and `AIza...`-style tokens are masked before printing.
+- Logs are redacted: the configured key and Google API-key-shaped tokens are masked before printing.
 - Error responses carry an incident id instead of a stack trace and never include credentials.
 - The container runs as a non-root user.
 - Only the synthetic challenge data is used; no personal data is processed or stored.
