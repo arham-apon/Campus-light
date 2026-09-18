@@ -276,15 +276,18 @@ curl -s -X POST http://localhost:8000/optimize-energy -H 'Content-Type: applicat
 | `/health` ready after start | 1.6 s (limit is 60 s) |
 | Secrets | `.env` ignored, never committed, no key in any tracked file or in git history |
 | Malformed requests | Return 400 with a field list and no stack trace |
+| **Public URL, from outside the machine** | `/health` 200, SAMPLE-01 200 in 2.0 s with reference-optimal totals, malformed body 400 |
 
-### Not verified
+### Still to do
 
-| Gap | Why | What to do |
+| Gap | Status | What to do |
 |---|---|---|
-| **Docker image never built or run** | Docker Desktop's engine would not start on this machine | Run `docker build -t gridwise:latest .` then `docker run --rm -p 8000:8000 --env-file .env gridwise:latest` and check `/health` |
-| **No public URL** | `cloudflared` is not installed | Install it, run the tunnel, and put the URL in the README |
-| **README placeholders** | Only you know these | Fill in `<repo-url>`, `<dockerhub-user>`, the image digest and the tunnel URL |
+| **Docker image** | Cannot build here: Docker Desktop's engine has no WSL distribution to run on | Push `.github/workflows/docker-image.yml`. It builds in the cloud, smoke-tests the image and publishes it to GHCR, then prints the digest for the README |
+| **GHCR package visibility** | Defaults to private | Repository → Packages → `gridwise` → Package settings → Change visibility → Public |
+| **Image digest in README** | Unknown until the workflow runs | Copy it from the workflow run summary into section 9 |
+| **Tunnel process** | Running now | It must stay running. If it restarts, the URL changes and README section 10 needs updating |
 | **3-minute video** | Not a coding task | Tie-break only, no base points, but still on the checklist |
+| **Repository visibility** | Private during the event | Make it public after the deadline, as the rules require |
 
 ### Risks worth knowing
 

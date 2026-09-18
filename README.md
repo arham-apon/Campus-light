@@ -64,7 +64,7 @@ Requires Python 3.11 to 3.13 and a free Google AI Studio API key (see section 3)
 Linux / macOS:
 
 ```bash
-git clone <repo-url> && cd <repo-folder>
+git clone https://github.com/arham-apon/Campus-light.git && cd Campus-light
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # then edit .env and set GEMINI_API_KEY
@@ -74,7 +74,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 Windows (PowerShell):
 
 ```powershell
-git clone <repo-url>; cd <repo-folder>
+git clone https://github.com/arham-apon/Campus-light.git; cd Campus-light
 py -3.13 -m venv .venv; .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env      # then edit .env and set GEMINI_API_KEY
@@ -309,17 +309,24 @@ docker run --rm -p 8000:8000 --env-file .env --name gridwise gridwise:latest
 curl -s localhost:8000/health
 ```
 
-Pull the published image instead of building (exact tag and digest):
+Pull the published image instead of building:
 
 ```bash
-docker pull docker.io/<dockerhub-user>/gridwise:preli-1.0.0
-# digest: docker.io/<dockerhub-user>/gridwise@sha256:<digest-recorded-after-push>
-docker run --rm -d -p 8000:8000 -e GEMINI_API_KEY="$GEMINI_API_KEY" docker.io/<dockerhub-user>/gridwise:preli-1.0.0
+docker pull ghcr.io/arham-apon/gridwise:preli-1.0.0
+docker run --rm -d -p 8000:8000 -e GEMINI_API_KEY="$GEMINI_API_KEY" ghcr.io/arham-apon/gridwise:preli-1.0.0
 sleep 5 && curl -s localhost:8000/health
 ```
 
-> **Submitter to fill in:** replace `<dockerhub-user>` and the digest after running
-> `docker push` (`docker inspect --format='{{index .RepoDigests 0}}' <image>` prints the digest).
+The image is built, smoke-tested and published by
+[`.github/workflows/docker-image.yml`](.github/workflows/docker-image.yml) on every push to `main`.
+That workflow starts the published image, asserts `/health` returns `{"status":"ok"}`, asserts it runs
+as the non-root user `appuser`, posts a real scenario and checks a 24-hour plan comes back, and
+confirms no Gemini secret is baked into the image.
+
+> **Submitter to fill in:** the immutable digest, printed in the workflow run summary as
+> `ghcr.io/arham-apon/gridwise@sha256:...`. The GHCR package must also be switched to public
+> (repository → Packages → `gridwise` → Package settings → Change visibility → Public), otherwise
+> judges cannot pull it.
 
 The only required environment variable is `GEMINI_API_KEY`. The service is single-process by design
 (`--workers 1`) because the cache and model cooldowns live in process memory.
@@ -328,15 +335,23 @@ The only required environment variable is `GEMINI_API_KEY`. The service is singl
 
 ## 10. Public endpoint
 
-> **Submitter to fill in:** the live base URL, from `cloudflared tunnel --no-autoupdate --url http://localhost:8000`.
-
-Base URL: `https://<your-tunnel>.trycloudflare.com`
+Base URL: **`https://adjustment-flexible-prefers-mat.trycloudflare.com`**
 
 ```bash
-curl -s https://<your-tunnel>.trycloudflare.com/health
-curl -s -X POST https://<your-tunnel>.trycloudflare.com/optimize-energy \
+curl -s https://adjustment-flexible-prefers-mat.trycloudflare.com/health
+```
+
+```bash
+curl -s -X POST https://adjustment-flexible-prefers-mat.trycloudflare.com/optimize-energy \
      -H 'Content-Type: application/json' -d @data/sample_request.json
 ```
+
+Verified from outside the development machine: `/health` returns `{"status":"ok"}`, SAMPLE-01 returns
+HTTP 200 in about 2.0 s with the reference-optimal totals (2692.5 kWh / 38365 BDT / 175 kWh peak),
+and a malformed body returns 400.
+
+> The URL comes from a Cloudflare quick tunnel and lives only as long as the `cloudflared` process
+> that created it. If that process is restarted the URL changes and this section must be updated.
 
 ---
 
