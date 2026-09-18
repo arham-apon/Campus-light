@@ -81,15 +81,21 @@ def isolated(monkeypatch):
     lc._cooldown_until.clear()
     lc._config_cache.clear()
     monkeypatch.setattr(lc, "_build_config", lambda model: object())  # skip the SDK import
-    monkeypatch.setattr(lc.time, "sleep", lambda s: time.sleep.__wrapped__(s) if False else None)  # retry backoff
     yield
+    # Abandoned hedge/timeout calls keep running in worker threads until their fake sleep ends.
+    # Wait for them so a straggler cannot update model health inside a later test.
+    give_up = time.monotonic() + 3
+    while time.monotonic() < give_up and any(t.name.startswith("llm") and t.is_alive() for t in threading.enumerate()):
+        time.sleep(0.02)
     lc._cache.clear()
     lc._cooldown_until.clear()
 
 
-def run(monkeypatch, script, notes=("a",), **overrides):
-    """Extract with a fake client; returns (result, client)."""
+def run(monkeypatch, script, notes=("a",), cooling=None, **overrides):
+    """Extract with a fake client; returns (result, client). `cooling` maps model -> seconds left."""
     client = FakeClient(script)
+    for model, seconds in (cooling or {}).items():
+        lc._cooldown_until[model] = lc._now() + seconds
     monkeypatch.setattr(lc, "get_settings", lambda: settings(**overrides))
     monkeypatch.setattr(lc, "_get_client", lambda: client)
     return lc.extract_directives(list(notes), 200.0), client
@@ -150,7 +156,7 @@ def test_permanent_error_retires_the_model_for_a_long_while(monkeypatch):
     assert result.model == "F1"
     assert lc._cooldown_until["P"] - lc._now() > 250
     lc.extract_directives(["more"], 200.0)
-    assert client.count("P") == 1  # not retried, not even in the retry round
+    assert client.count("P") == 1  # never tried again
 
 
 def test_empty_answer_counts_as_a_failure(monkeypatch):
@@ -207,19 +213,44 @@ def test_hedging_can_be_disabled(monkeypatch):
     assert (result.model, client.calls) == ("P", ["P"])
 
 
-def test_failure_does_not_start_another_call_while_one_is_still_in_flight(monkeypatch):
-    # P is slow, F1 is hedged in and fails fast; F2 must wait until P has also failed.
+def test_a_failed_hedge_does_not_immediately_start_yet_another_call(monkeypatch):
+    # P is slow but succeeds at 0.45 s. F1 is hedged in at 0.3 s and fails at once. Failing over to F2
+    # right then would waste a call while P is still in flight; the next hedge would only fire at 0.6 s.
+    result, client = run(monkeypatch, {"P": [ok(delay=0.45)], "F1": [err(ApiError(503))], "F2": [ok()]},
+                         llm_hedge_delay_seconds=0.3)
+    assert result.model == "P"
+    assert client.calls == ["P", "F1"]
+
+
+def test_failover_starts_the_next_model_the_moment_nothing_is_in_flight(monkeypatch):
+    # P fails at 0.35 s while F1 (hedged in at 0.25 s) already failed: F2 starts at 0.35 s, not at
+    # the next hedge tick (0.5 s).
+    started = time.perf_counter()
     result, client = run(monkeypatch, {"P": [err(RuntimeError("late"), delay=0.35)],
                                        "F1": [err(RuntimeError("fast"))], "F2": [ok()]},
-                         llm_hedge_delay=0.1, llm_hedge_delay_seconds=0.1)
-    assert result.model == "F2"
-    assert client.calls == ["P", "F1", "F2"]
+                         llm_hedge_delay_seconds=0.25)
+    assert result.model == "F2" and client.calls == ["P", "F1", "F2"]
+    assert time.perf_counter() - started < 0.47
 
 
-def test_slow_primary_still_wins_when_the_hedge_fails(monkeypatch):
-    result, client = run(monkeypatch, {"P": [ok(delay=0.3)], "F1": [err(ApiError(503))], "F2": [ok()]},
-                         llm_hedge_delay_seconds=0.1)
-    assert result.model == "P" and client.count("F2") == 0
+def test_hedging_skips_models_known_to_be_cooling(monkeypatch):
+    # P is slow. F1 is rate-limited (cooling), F2 is healthy: the hedge must go straight to F2.
+    result, client = run(monkeypatch, {"P": [ok(delay=0.5)], "F1": [ok()], "F2": [ok()]},
+                         cooling={"F1": 30}, llm_hedge_delay_seconds=0.1)
+    assert result.model == "F2" and client.calls == ["P", "F2"]
+
+
+def test_cooling_models_are_still_the_last_resort_on_failure(monkeypatch):
+    # Nothing healthy is left after P fails, so the cooling F1 gets its chance (its quota may have recovered).
+    result, client = run(monkeypatch, {"P": [err(ApiError(503))], "F1": [ok()]}, cooling={"F1": 30},
+                         gemini_fallback_models=["F1"])
+    assert result.model == "F1" and client.calls == ["P", "F1"]
+
+
+def test_all_models_cooling_still_tries_the_soonest_to_recover(monkeypatch):
+    result, client = run(monkeypatch, {"P": [ok()], "F1": [ok()]}, cooling={"P": 40, "F1": 10},
+                         gemini_fallback_models=["F1"])
+    assert result.model == "F1" and client.calls == ["F1"]
 
 
 # --- budget -----------------------------------------------------------------------------------
@@ -227,7 +258,7 @@ def test_slow_primary_still_wins_when_the_hedge_fails(monkeypatch):
 
 def test_total_budget_bounds_the_wait(monkeypatch):
     started = time.perf_counter()
-    result, _ = run(monkeypatch, {"P": [ok(delay=1.5)]}, gemini_fallback_models=[], llm_total_budget_seconds=0.4,
+    result, _ = run(monkeypatch, {"P": [ok(delay=0.9)]}, gemini_fallback_models=[], llm_total_budget_seconds=0.4,
                     llm_max_retries=0)
     elapsed = time.perf_counter() - started
     assert result.source == "failed" and result.error == "BudgetExceeded"
@@ -268,6 +299,15 @@ def test_cooldown_lengths(exc, expected):
     assert lc._cooldown_seconds(exc) == expected
 
 
+def test_daily_quota_gets_a_long_cooldown_but_per_minute_quota_does_not():
+    per_day = ApiError(429, "{'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaValue': '20', "
+                            "'retryDelay': '37s'}")
+    per_minute = ApiError(429, "{'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', "
+                               "'quotaValue': '15', 'retryDelay': '42s'}")
+    assert lc._cooldown_seconds(per_day) == 3600.0   # the 37 s hint is not the real reset
+    assert lc._cooldown_seconds(per_minute) == 42.0
+
+
 def test_plan_puts_cooling_models_last_soonest_first(monkeypatch):
     now = lc._now()
     lc._cooldown_until.update({"P": now + 40, "F2": now + 10})
@@ -303,3 +343,26 @@ def test_warmup_async_returns_a_daemon_thread(monkeypatch):
     thread = lc.warmup_async()
     thread.join(timeout=2)
     assert thread.daemon and not thread.is_alive()
+
+
+# --- per-model request config -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("model,expected", [
+    ("gemini-3.5-flash", True), ("gemini-3-flash-preview", True), ("gemini-3.8-flash", True),
+    ("gemini-3.5-flash-lite", False), ("gemini-3.1-flash-lite", False), ("gemini-3.1-pro-preview", False),
+    ("gemma-4-26b-a4b-it", False), ("gemini-2.5-flash", False), ("gemini-flash-latest", False),
+])
+def test_only_plain_gemini_3_flash_gets_minimal_thinking(model, expected):
+    assert lc._wants_minimal_thinking(model) is expected
+
+
+def test_real_config_is_accepted_by_the_installed_sdk(monkeypatch):
+    monkeypatch.undo()  # the autouse fixture stubs _build_config; use the real one here
+    lc._config_cache.clear()
+    thinking = lc._build_config("gemini-3.5-flash")
+    plain = lc._build_config("gemini-3.5-flash-lite")
+    assert thinking.thinking_config is not None and str(thinking.thinking_config.thinking_level).lower().endswith("minimal")
+    assert plain.thinking_config is None
+    assert thinking.temperature == 0.0 and thinking.response_mime_type == "application/json"
+    assert lc._build_config("gemini-3.5-flash") is thinking  # cached

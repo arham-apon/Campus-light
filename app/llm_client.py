@@ -32,6 +32,7 @@ _RETRYABLE_4XX = {408, 429}  # request timeout, quota; every other 4xx is perman
 # How long a model is skipped (moved to the back of the line) after a failure.
 _QUOTA_COOLDOWN_DEFAULT_SECONDS = 30.0   # 429 without a usable retry hint
 _QUOTA_COOLDOWN_MAX_SECONDS = 60.0       # the free tier's per-minute window; re-probe at least this often
+_DAILY_QUOTA_COOLDOWN_SECONDS = 3600.0   # a per-DAY quota (e.g. 20/day on gemini-3.5-flash): re-probe hourly
 _PERMANENT_COOLDOWN_SECONDS = 300.0      # 400/401/403/404: bad config or retired model
 _BAD_OUTPUT_COOLDOWN_SECONDS = 30.0      # unparseable / empty answers
 _TRANSIENT_COOLDOWN_SECONDS = 5.0        # 5xx, timeouts, connection errors
@@ -39,6 +40,7 @@ _TRANSIENT_COOLDOWN_SECONDS = 5.0        # 5xx, timeouts, connection errors
 # An extra attempt is only worth starting if at least this much of the budget is left.
 _MIN_USEFUL_ATTEMPT_SECONDS = 3.0
 
+_THINKING_FLASH_RE = re.compile(r"^gemini-3(?:\.\d+)?-flash(?:-preview)?$")
 _RETRY_DELAY_RE = re.compile(r"retry(?:Delay)?['\"]?\s*[:=]?\s*(?:in\s+)?['\"]?(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
 
 _client: Any = None
@@ -196,6 +198,8 @@ def _retry_delay_seconds(exc: BaseException) -> float | None:
 def _cooldown_seconds(exc: BaseException) -> float:
     status = _status_of(exc)
     if status == 429:
+        if "perday" in str(exc).lower():  # quotaId ...PerDay...: the "retry in Ns" hint is not the real reset
+            return _DAILY_QUOTA_COOLDOWN_SECONDS
         hint = _retry_delay_seconds(exc)
         return min(_QUOTA_COOLDOWN_MAX_SECONDS, max(1.0, hint)) if hint else _QUOTA_COOLDOWN_DEFAULT_SECONDS
     if status is not None:
@@ -218,6 +222,12 @@ def _mark_success(model: str) -> None:
         _cooldown_until.pop(model, None)
 
 
+def _cooling(models: list[str]) -> set[str]:
+    now = _now()
+    with _health_lock:
+        return {m for m in models if _cooldown_until.get(m, 0.0) > now}
+
+
 def _plan(models: list[str]) -> list[str]:
     """Healthy models in configured order, then cooling ones, soonest to recover first."""
     now = _now()
@@ -232,13 +242,20 @@ def _plan(models: list[str]) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+def _wants_minimal_thinking(model: str) -> bool:
+    """Gemini 3.x Flash models think by default, which costs ~3 s and ~400 tokens on these tiny
+    extractions (measured: 3.5-flash 3.2 s -> 1.4 s median with thinking minimal). The Lite models
+    do not think, and Pro / Gemma reject or ignore the setting, so only plain Flash gets it."""
+    return _THINKING_FLASH_RE.match(model) is not None
+
+
 def _build_config(model: str):
     cached = _config_cache.get(model)
     if cached is not None:
         return cached
     from google.genai import types
 
-    config = types.GenerateContentConfig(
+    kwargs: dict[str, Any] = dict(
         system_instruction=SYSTEM_INSTRUCTION,
         temperature=0.0,
         top_p=1.0,
@@ -247,6 +264,9 @@ def _build_config(model: str):
         response_mime_type="application/json",
         response_schema=DirectiveInterpretationPackage,
     )
+    if _wants_minimal_thinking(model):
+        kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="minimal")
+    config = types.GenerateContentConfig(**kwargs)
     _config_cache[model] = config
     return config
 
@@ -298,12 +318,14 @@ def _attempt(model: str, prompt: str) -> _Outcome:
 # --------------------------------------------------------------------------
 
 
-def _race(models: list[str], prompt: str, hedge_delay: float, deadline: float) -> _Race:
+def _race(models: list[str], cooling: set[str], prompt: str, hedge_delay: float, deadline: float) -> _Race:
     """Try `models` in order until one answers or `deadline` (a _now() value) passes.
 
     The next model starts when the current one fails, or alongside it once `hedge_delay` seconds
     pass without an answer (0 disables that). While attempts are in flight a failure does not start
-    another one, so each request spends at most as many calls as it needs.
+    another one, so each request spends at most as many calls as it needs. Models in `cooling` (known
+    rate-limited or down) are never hedged to; they are only used as a last resort when everything
+    ahead of them has failed.
     """
     race = _Race()
     if not models:
@@ -313,12 +335,14 @@ def _race(models: list[str], prompt: str, hedge_delay: float, deadline: float) -
     pending: dict[Future, str] = {}
     queue = list(models)
 
-    def launch() -> bool:
-        if not queue:
+    def launch(hedge: bool = False) -> bool:
+        candidates = [m for m in queue if not (hedge and m in cooling)]
+        if not candidates:
             return False
         if race.launched and deadline - _now() < _MIN_USEFUL_ATTEMPT_SECONDS:
             return False
-        model = queue.pop(0)
+        model = candidates[0]
+        queue.remove(model)
         pending[pool.submit(_attempt, model, prompt)] = model
         race.launched += 1
         return True
@@ -329,12 +353,13 @@ def _race(models: list[str], prompt: str, hedge_delay: float, deadline: float) -
             remaining = deadline - _now()
             if remaining <= 0:
                 break
-            hedging = hedge_delay > 0 and bool(queue) and remaining >= _MIN_USEFUL_ATTEMPT_SECONDS
+            hedging = (hedge_delay > 0 and remaining >= _MIN_USEFUL_ATTEMPT_SECONDS
+                       and any(m not in cooling for m in queue))
             done, _ = wait(list(pending), timeout=min(remaining, hedge_delay) if hedging else remaining,
                            return_when=FIRST_COMPLETED)
             if not done:
                 if hedging:
-                    launch()  # the current model is slow: start the next one alongside it
+                    launch(hedge=True)  # the current model is slow: start the next healthy one alongside it
                 continue
             for future in done:
                 pending.pop(future)
@@ -343,7 +368,7 @@ def _race(models: list[str], prompt: str, hedge_delay: float, deadline: float) -
                     race.winner = outcome
                     return race
                 race.failures.append(outcome)
-            if not pending:
+            if True:
                 launch()  # everything in flight failed: fail over to the next model
         for future, model in pending.items():  # deadline hit with calls still running
             race.failures.append(_Outcome(model, None, "BudgetExceeded"))
@@ -382,7 +407,7 @@ def extract_directives(notes: list[str], battery_capacity_kwh: float) -> Extract
                 break
             time.sleep(backoff)
 
-        race = _race(models, prompt, settings.llm_hedge_delay_seconds, deadline)
+        race = _race(models, _cooling(models), prompt, settings.llm_hedge_delay_seconds, deadline)
         attempts += race.launched
         for failure in race.failures:
             last_error = failure.error

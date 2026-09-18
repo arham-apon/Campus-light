@@ -13,9 +13,17 @@ load_dotenv(override=False)
 # new keys. gemini-3.5-flash-lite scored 18/18 on the public notes at ~1.3 s per call.
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
-# Tried when the primary is rate-limited, overloaded, slow or gone. Free-tier quotas are enforced
-# per model (15 requests/minute each), so every extra model also adds request capacity.
-DEFAULT_GEMINI_FALLBACK_MODELS: tuple[str, ...] = ("gemini-3.5-flash", "gemini-3.1-flash-lite")
+# Tried, in this order, when the primary is rate-limited, overloaded, slow or gone. Free-tier quotas
+# are enforced per model (15 requests/minute each), so every extra model also adds request capacity.
+# Measured on the 10 public cases (2026-09-18):
+#   gemini-3.5-flash       1.4 s median with thinking minimal, but frequently 503 / 429 (busy)
+#   gemini-3.1-flash-lite  accurate on every call that answered, but slow (~5.6 s) and ~20 % timeouts
+#   gemma-4-26b-a4b-it     0 errors and ~3.5 s, but only 15/18 notes right; last resort beats all no_op
+DEFAULT_GEMINI_FALLBACK_MODELS: tuple[str, ...] = (
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemma-4-26b-a4b-it",
+)
 
 # The Gemini API rejects any request deadline under 10 s with a 400 ("Minimum allowed deadline
 # is 10s"), which would silently turn every note into no_op.
