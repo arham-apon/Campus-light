@@ -27,15 +27,19 @@ def _clean_explanation(text: str | None, fallback: str) -> str:
 
 def _normalise_hours(raw: Iterable | None) -> list[int]:
     """Unique ints inside [0, 23], ascending. Anything else is dropped."""
-    if not raw:
+    if not raw or isinstance(raw, (str, bytes)):
+        return []
+    try:
+        values = list(raw)
+    except TypeError:  # not iterable
         return []
     out: set[int] = set()
-    for value in raw:
+    for value in values:
         try:
             if isinstance(value, bool):
                 continue
             hour = int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # OverflowError: int(float("inf"))
             continue
         if 0 <= hour <= 23:
             out.add(hour)

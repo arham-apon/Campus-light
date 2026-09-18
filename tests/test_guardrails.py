@@ -100,6 +100,18 @@ def test_unknown_directive_type_becomes_no_op():
     assert out[0].directive_type.value == "no_op" and out[0].applies is False
 
 
+def test_malformed_hours_never_crash():
+    def entry(hours):
+        return E.model_construct(note_index=0, directive_type="no_charge_window", hours=hours, factor=None,
+                                 minimum_energy_kwh=None, reserve_is_fraction_of_capacity=False,
+                                 max_grid_kwh=None, explanation="")
+
+    assert guard([entry([float("inf"), float("nan"), 13, "x", None, True, 24, -1, 10**30])], 1, 200.0, 40.0)[0] \
+        .structured_adjustment.model_dump() == {"hours": [13]}
+    for junk in (5, None, "1314", b"12", 3.5):
+        assert guard([entry(junk)], 1, 200.0, 40.0)[0].directive_type.value == "no_op"
+
+
 def test_entries_are_mapped_by_index_when_indices_are_canonical():
     out = guard([E(note_index=1, directive_type="no_discharge_window", hours=[5]),
                  E(note_index=0, directive_type="no_charge_window", hours=[2])], 2, 200.0, 40.0)
