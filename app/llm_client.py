@@ -368,7 +368,7 @@ def _race(models: list[str], cooling: set[str], prompt: str, hedge_delay: float,
                     race.winner = outcome
                     return race
                 race.failures.append(outcome)
-            if True:
+            if not pending:
                 launch()  # everything in flight failed: fail over to the next model
         for future, model in pending.items():  # deadline hit with calls still running
             race.failures.append(_Outcome(model, None, "BudgetExceeded"))
